@@ -12,7 +12,7 @@ genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 # Set up the model
 generation_config = {
-    "temperature": 0.9,
+    "temperature": 0.5, # Lower temperature for more precise math
     "top_p": 1,
     "max_output_tokens": 2048,
 }
@@ -24,6 +24,7 @@ safety_settings = [
     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
 ]
 
+# Using gemini-1.5-flash as it is fast and multimodal (supports images)
 model = genai.GenerativeModel(
     model_name="gemini-3-pro-preview",
     generation_config=generation_config,
@@ -31,16 +32,32 @@ model = genai.GenerativeModel(
     safety_settings=safety_settings
 )
 
-async def get_gemini_response(chat_history: list, new_question: str) -> str:
+async def get_gemini_response(chat_history: list, new_question: str, image_data: bytes = None) -> str:
     """
     Gets a response from the Gemini API.
     'chat_history' should be a list of dictionaries from the database.
+    'image_data' is optional bytes of the image.
     """
     try:
-        # The history is already formatted, just need to start the chat
+        # Start the chat with history
         convo = model.start_chat(history=chat_history)
-        await convo.send_message_async(new_question)
+        
+        if image_data:
+            # If there is an image, we send it along with the text
+            # We create a list of content parts
+            content = [
+                new_question if new_question else "Что изображено на картинке? Реши эту задачу.",
+                {
+                    "mime_type": "image/jpeg",
+                    "data": image_data
+                }
+            ]
+            await convo.send_message_async(content)
+        else:
+            # Text only
+            await convo.send_message_async(new_question)
+            
         return convo.last.text
     except Exception as e:
         print(f"Error getting response from Gemini: {e}")
-        return "Извините, произошла ошибка при обращении к нейросети. Попробуйте еще раз позже."
+        return f"Извините, произошла ошибка при обращении к нейросети: {e}"

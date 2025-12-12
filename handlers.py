@@ -1,4 +1,5 @@
-from aiogram import Router, types, F
+import io
+from aiogram import Router, types, F, Bot
 from aiogram.filters import CommandStart
 from keyboards import main_keyboard
 import database
@@ -12,18 +13,23 @@ async def start(message: types.Message):
     database.add_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
     await message.answer(
         f"Здравствуйте, {message.from_user.first_name}!\n"
-        f"Я ваш личный помощник по математике. Задайте мне любой вопрос.",
-        reply_markup=main_keyboard() # You can remove this keyboard if it's not needed
+        f"Я ваш личный помощник по математике. Задайте мне любой вопрос или отправьте фото задачи.",
+        reply_markup=main_keyboard()
     )
 
-@router.message(F.text)
-async def handle_text_message(message: types.Message):
-    """Handles all text messages from the user."""
+async def process_and_respond(message: types.Message, user_question: str, image_data: bytes | None = None):
+    """
+    A helper function to process user's request (text or image) and send it to Gemini.
+    """
     user_id = message.from_user.id
-    user_question = message.text
 
     # 1. Save user's message to the database
-    database.add_message(user_id, 'user', user_question)
+    # For images, we save a placeholder text.
+    db_content = user_question
+    if image_data:
+        # We don't store the image, just the caption and a placeholder
+        db_content = f"[Изображение] {user_question}".strip()
+    database.add_message(user_id, 'user', db_content)
 
     # 2. Send a "thinking..." message
     thinking_message = await message.answer("Думаю...")
@@ -32,16 +38,35 @@ async def handle_text_message(message: types.Message):
     chat_history = database.get_chat_history(user_id)
 
     # 4. Get response from Gemini
-    gemini_answer = await gemini.get_gemini_response(chat_history, user_question)
+    gemini_answer = await gemini.get_gemini_response(chat_history, user_question, image_data)
 
     # 5. Save Gemini's response to the database
     database.add_message(user_id, 'model', gemini_answer)
 
     # 6. Edit the "thinking..." message with the final answer
-    await thinking_message.edit_text(gemini_answer, parse_mode="Markdown")
+    # Use a try-except block in case the message contains characters not supported by Markdown
+    try:
+        await thinking_message.edit_text(gemini_answer, parse_mode="Markdown")
+    except Exception:
+        await thinking_message.edit_text(gemini_answer)
 
-# You can remove the old help command or repurpose it later
-# @router.message(Command(commands=['help']))
-# async def help_command(message: types.Message):
-#     """Sends a message when the /help command is issued."""
-#     await message.answer('This is a help message.')
+
+@router.message(F.text)
+async def handle_text_message(message: types.Message):
+    """Handles all text messages from the user."""
+    await process_and_respond(message, message.text)
+
+
+@router.message(F.photo)
+async def handle_photo_message(message: types.Message, bot: Bot):
+    """Handles messages with photos."""
+    # Download the photo into a bytes buffer
+    # message.photo[-1] is the largest version of the photo
+    photo_file = await bot.get_file(message.photo[-1].file_id)
+    image_bytes_io = await bot.download_file(photo_file.file_path)
+    image_data = image_bytes_io.read()
+
+    # The user's question can be in the caption
+    user_question = message.caption if message.caption else ""
+
+    await process_and_respond(message, user_question, image_data)

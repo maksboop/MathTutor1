@@ -1,18 +1,22 @@
 import os
 import google.generativeai as genai
 from dotenv import load_dotenv
+import PIL.Image
+import io
 
 load_dotenv()
 
-# Load the system prompt from the file
-with open('prompt.md', 'r', encoding='utf-8') as f:
-    SYSTEM_PROMPT = f.read()
+# Загружаем промпт
+try:
+    with open('prompt.md', 'r', encoding='utf-8') as f:
+        SYSTEM_PROMPT = f.read()
+except FileNotFoundError:
+    SYSTEM_PROMPT = "Ты помощник по математике."
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-# Set up the model
 generation_config = {
-    "temperature": 0.5, # Lower temperature for more precise math
+    "temperature": 0.7,  # Чуть понизим для точности в математике
     "top_p": 1,
     "max_output_tokens": 2048,
 }
@@ -24,7 +28,7 @@ safety_settings = [
     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
 ]
 
-# Using gemini-1.5-flash as it is fast and multimodal (supports images)
+# Рекомендую использовать gemini-1.5-flash для скорости и работы с картинками
 model = genai.GenerativeModel(
     model_name="gemini-3-pro-preview",
     generation_config=generation_config,
@@ -32,32 +36,30 @@ model = genai.GenerativeModel(
     safety_settings=safety_settings
 )
 
-async def get_gemini_response(chat_history: list, new_question: str, image_data: bytes = None) -> str:
-    """
-    Gets a response from the Gemini API.
-    'chat_history' should be a list of dictionaries from the database.
-    'image_data' is optional bytes of the image.
-    """
+
+async def get_gemini_response(chat_history: list, new_question: str) -> str:
+    """Текстовый чат (как было раньше)."""
     try:
-        # Start the chat with history
         convo = model.start_chat(history=chat_history)
-        
-        if image_data:
-            # If there is an image, we send it along with the text
-            # We create a list of content parts
-            content = [
-                new_question if new_question else "Что изображено на картинке? Реши эту задачу.",
-                {
-                    "mime_type": "image/jpeg",
-                    "data": image_data
-                }
-            ]
-            await convo.send_message_async(content)
-        else:
-            # Text only
-            await convo.send_message_async(new_question)
-            
-        return convo.last.text
+        response = await convo.send_message_async(new_question)
+        return response.text
     except Exception as e:
-        print(f"Error getting response from Gemini: {e}")
-        return f"Извините, произошла ошибка при обращении к нейросети: {e}"
+        print(f"Error Gemini Text: {e}")
+        return "Ошибка нейросети. Попробуйте позже."
+
+
+async def get_gemini_vision_response(image_bytes: bytes, user_caption: str) -> str:
+    """Анализ изображения + текста."""
+    try:
+        # Превращаем байты в картинку PIL
+        img = PIL.Image.open(io.BytesIO(image_bytes))
+
+        # Если подписи нет, даем стандартную команду
+        prompt = user_caption if user_caption else "Реши математическую задачу с этого изображения. Распиши решение подробно."
+
+        # Отправляем картинку и текст (generate_content_async используется для 'разовых' запросов с картинками)
+        response = await model.generate_content_async([prompt, img])
+        return response.text
+    except Exception as e:
+        print(f"Error Gemini Vision: {e}")
+        return "Не удалось обработать изображение. Убедитесь, что оно четкое."

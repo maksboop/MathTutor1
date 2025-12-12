@@ -1,12 +1,13 @@
-import sqlite3
-import json
+import aiosqlite
 
-def init_db():
+DB_NAME = 'math_tutor.db'
+
+
+async def init_db():
     """Initializes the database and creates tables if they don't exist."""
-    with sqlite3.connect('math_tutor.db') as conn:
-        cursor = conn.cursor()
+    async with aiosqlite.connect(DB_NAME) as conn:
         # Create users table
-        cursor.execute('''
+        await conn.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 username TEXT,
@@ -14,7 +15,7 @@ def init_db():
             )
         ''')
         # Create messages table
-        cursor.execute('''
+        await conn.execute('''
             CREATE TABLE IF NOT EXISTS messages (
                 message_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
@@ -24,36 +25,41 @@ def init_db():
                 FOREIGN KEY (user_id) REFERENCES users (user_id)
             )
         ''')
-        conn.commit()
+        await conn.commit()
 
-def add_user(user_id: int, username: str, first_name: str):
+
+async def add_user(user_id: int, username: str, first_name: str):
     """Adds a new user to the database if they don't already exist."""
-    with sqlite3.connect('math_tutor.db') as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
-        if cursor.fetchone() is None:
-            cursor.execute("INSERT INTO users (user_id, username, first_name) VALUES (?, ?, ?)",
-                           (user_id, username, first_name))
-            conn.commit()
+    async with aiosqlite.connect(DB_NAME) as conn:
+        cursor = await conn.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
+        if await cursor.fetchone() is None:
+            await conn.execute("INSERT INTO users (user_id, username, first_name) VALUES (?, ?, ?)",
+                               (user_id, username, first_name))
+            await conn.commit()
 
-def add_message(user_id: int, role: str, content: str):
+
+async def add_message(user_id: int, role: str, content: str):
     """Adds a message to the user's chat history."""
-    with sqlite3.connect('math_tutor.db') as conn:
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)",
-                       (user_id, role, content))
-        conn.commit()
+    async with aiosqlite.connect(DB_NAME) as conn:
+        await conn.execute("INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)",
+                           (user_id, role, content))
+        await conn.commit()
 
-def get_chat_history(user_id: int) -> list:
+
+async def get_chat_history(user_id: int) -> list:
     """Retrieves the chat history for a user, formatted for Gemini."""
-    with sqlite3.connect('math_tutor.db') as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT role, content FROM messages WHERE user_id = ? ORDER BY timestamp ASC", (user_id,))
-        history = cursor.fetchall()
-        
+    async with aiosqlite.connect(DB_NAME) as conn:
+        conn.row_factory = aiosqlite.Row  # Позволяет обращаться к полям по имени, если нужно
+        cursor = await conn.execute("SELECT role, content FROM messages WHERE user_id = ? ORDER BY timestamp ASC",
+                                    (user_id,))
+        history = await cursor.fetchall()
+
         # Format for Gemini API
         gemini_history = []
-        for role, content in history:
+        for row in history:
+            # aiosqlite возвращает объекты Row или кортежи, здесь мы берем по индексу или распаковываем
+            role = row[0]
+            content = row[1]
             gemini_history.append({"role": role, "parts": [content]})
-            
+
         return gemini_history

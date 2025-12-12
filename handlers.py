@@ -1,14 +1,13 @@
 import io
-from aiogram import Router, types, F
-from aiogram.filters import CommandStart, Command  # 1. Импортируем Command
+from aiogram import Router, types, F, Bot
+from aiogram.filters import CommandStart, Command
+from aiogram.enums import ChatAction, ParseMode
+from aiogram.utils.chat_action import ChatActionSender
 from keyboards import main_keyboard
 import database
 import gemini
 
 router = Router()
-
-
-# --- 1. Сначала команды и специальные фильтры ---
 
 @router.message(CommandStart())
 async def start(message: types.Message):
@@ -20,69 +19,82 @@ async def start(message: types.Message):
         reply_markup=main_keyboard()
     )
 
-
-@router.message(Command("clear"))  # 2. Команда clear должна быть ДО F.text
-async def cmd_clear(message: types.Message):
-    """Очищает историю диалога."""
-    await database.clear_history(message.from_user.id)
-    await message.answer(
-        "История переписки очищена! 🧹\n"
-        "Я забыл контекст предыдущих задач. Можем начать новую тему!",
-        reply_markup=main_keyboard()
+@router.message(F.text == "📚 Справка")
+@router.message(Command('help'))
+async def help_command(message: types.Message):
+    """Sends a help message."""
+    help_text = (
+        "<b>Справка</b>\n\n"
+        "Я — ваш персональный репетитор по математике. Моя цель — не просто дать ответ, а научить вас решать задачи.\n\n"
+        "<b>Что я умею:</b>\n"
+        "🔹 <b>Решать по фото:</b> Отправьте фотографию уравнения или задачи из учебника.\n"
+        "🔹 <b>Пошаговые объяснения:</b> Я расписываю решение подробно, чтобы вы поняли логику.\n"
+        "🔹 <b>Теория:</b> Могу объяснить математические термины и теоремы.\n\n"
+        "<b>Как пользоваться:</b>\n"
+        "Просто напишите вопрос или прикрепите картинку. Если что-то непонятно в решении, смело переспрашивайте!\n"
+        "Используйте кнопку '🧹 Начать заново', чтобы очистить историю и начать новую тему."
     )
+    await message.answer(help_text, parse_mode=ParseMode.HTML)
 
+@router.message(F.text == "🧹 Начать заново")
+@router.message(Command('clear'))
+async def clear_command(message: types.Message):
+    """Clears the user's chat history."""
+    await database.clear_history(message.from_user.id)
+    await message.answer("Ваша история сообщений очищена. Можете начать новую тему.")
 
-@router.message(F.photo)
-async def handle_photo_message(message: types.Message):
-    """Обрабатывает изображения с задачами."""
+async def process_and_respond(message: types.Message, user_question: str, image_data: bytes | None = None):
+    """
+    A helper function to process user's request (text or image) and send it to Gemini.
+    """
     user_id = message.from_user.id
-    user_caption = message.caption if message.caption else ""
+    
+    # Send initial placeholder
+    thinking_message = await message.answer("⏳ Анализирую задачу...")
 
-    log_text = f"[Отправил фото] {user_caption}"
-    await database.add_message(user_id, 'user', log_text)
+    gemini_answer = ""
+    db_content = user_question
 
-    thinking_message = await message.answer("Изучаю изображение... 🖼️")
+    # Determine action type
+    action_type = ChatAction.UPLOAD_PHOTO if image_data else ChatAction.TYPING
 
-    try:
-        bot = message.bot
-        photo = message.photo[-1]
-
-        file_io = io.BytesIO()
-        await bot.download(photo, destination=file_io)
-        image_bytes = file_io.getvalue()
-
-        gemini_answer = await gemini.get_gemini_vision_response(image_bytes, user_caption)
-
+    # Use ChatActionSender to keep the status active automatically
+    async with ChatActionSender(bot=message.bot, chat_id=message.chat.id, action=action_type):
+        if image_data:
+            db_content = f"[Изображение] {user_question}".strip()
+            # Add user message to DB
+            await database.add_message(user_id, 'user', db_content)
+            # Get response
+            gemini_answer = await gemini.get_gemini_vision_response(image_data, user_question)
+        else:
+            # Add user message to DB
+            await database.add_message(user_id, 'user', db_content)
+            # Get history
+            chat_history = await database.get_chat_history(user_id)
+            # Get response
+            gemini_answer = await gemini.get_gemini_response(chat_history, user_question)
+            
+        # Save model response to DB
         await database.add_message(user_id, 'model', gemini_answer)
-        await thinking_message.edit_text(gemini_answer, parse_mode="Markdown")
 
-    except Exception as e:
-        await thinking_message.edit_text("Произошла ошибка при загрузке фото.")
-        print(f"Photo Handler Error: {e}")
-
-
-# --- 2. В самом конце общий обработчик текста ---
+    # Edit the message with the result
+    try:
+        await thinking_message.edit_text(gemini_answer, parse_mode=ParseMode.HTML)
+    except Exception:
+        # Fallback if HTML is broken
+        await thinking_message.edit_text(gemini_answer)
 
 @router.message(F.text)
 async def handle_text_message(message: types.Message):
     """Handles all text messages from the user."""
-    user_id = message.from_user.id
-    user_question = message.text
+    if message.text not in ["📚 Справка", "🧹 Начать заново"]:
+        await process_and_respond(message, message.text)
 
-    # 1. Save user's message
-    await database.add_message(user_id, 'user', user_question)
-
-    # 2. Send "thinking..."
-    thinking_message = await message.answer("Думаю...")
-
-    # 3. Get chat history (с лимитом)
-    chat_history = await database.get_chat_history(user_id)
-
-    # 4. Get response from Gemini
-    gemini_answer = await gemini.get_gemini_response(chat_history, user_question)
-
-    # 5. Save response
-    await database.add_message(user_id, 'model', gemini_answer)
-
-    # 6. Edit message
-    await thinking_message.edit_text(gemini_answer, parse_mode="Markdown")
+@router.message(F.photo)
+async def handle_photo_message(message: types.Message, bot: Bot):
+    """Handles messages with photos."""
+    photo_file = await bot.get_file(message.photo[-1].file_id)
+    image_bytes_io = await bot.download_file(photo_file.file_path)
+    image_data = image_bytes_io.read()
+    user_question = message.caption if message.caption else ""
+    await process_and_respond(message, user_question, image_data=image_data)

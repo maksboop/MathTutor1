@@ -46,20 +46,33 @@ async def add_message(user_id: int, role: str, content: str):
         await conn.commit()
 
 
-async def get_chat_history(user_id: int) -> list:
-    """Retrieves the chat history for a user, formatted for Gemini."""
+async def get_chat_history(user_id: int, limit: int = 20) -> list:
+    """
+    Получает последние N сообщений пользователя.
+    Ограничение (LIMIT) нужно, чтобы контекст не стал слишком большим.
+    """
     async with aiosqlite.connect(DB_NAME) as conn:
-        conn.row_factory = aiosqlite.Row  # Позволяет обращаться к полям по имени, если нужно
-        cursor = await conn.execute("SELECT role, content FROM messages WHERE user_id = ? ORDER BY timestamp ASC",
-                                    (user_id,))
+        conn.row_factory = aiosqlite.Row
+        # 1. Берем последние 20 сообщений (сортируем от новых к старым - DESC)
+        cursor = await conn.execute(
+            "SELECT role, content FROM messages WHERE user_id = ? ORDER BY message_id DESC LIMIT ?",
+            (user_id, limit)
+        )
         history = await cursor.fetchall()
 
-        # Format for Gemini API
+        # 2. Разворачиваем список обратно, чтобы Gemini получал их в правильном порядке (от старых к новым)
+        history.reverse()
+
         gemini_history = []
         for row in history:
-            # aiosqlite возвращает объекты Row или кортежи, здесь мы берем по индексу или распаковываем
-            role = row[0]
-            content = row[1]
-            gemini_history.append({"role": role, "parts": [content]})
+            # row['role'] работает благодаря conn.row_factory = aiosqlite.Row
+            gemini_history.append({"role": row['role'], "parts": [row['content']]})
 
         return gemini_history
+
+
+async def clear_history(user_id: int):
+    """Удаляет историю сообщений пользователя."""
+    async with aiosqlite.connect(DB_NAME) as conn:
+        await conn.execute("DELETE FROM messages WHERE user_id = ?", (user_id,))
+        await conn.commit()
